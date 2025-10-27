@@ -1,8 +1,10 @@
 from machine import Pin, PWM, RTC
 #from umqtt.robust import MQTTClient
 import network, urequests, ujson
-import time, ntptime
+import time, ntptime, utime
 import sys, select
+import uasyncio as asyncio
+import socket
 
 
 # 初始化 Wi-Fi 連線指示燈
@@ -29,6 +31,181 @@ NOTES = [262, 330, 294, 196, 0,
          262, 294, 330, 262, 0,
          330, 262, 294, 196, 0,
          196, 294, 330, 262, 0]
+
+# ============================================================
+# 🧩 render_template() — 簡易 HTML 模板渲染
+# ============================================================
+def render_template(file, **kwargs):
+    """
+    讀取指定 HTML 檔案，將內容中 {key} 替換成 kwargs 的值。
+    例如 render_template("index.html", time="10:30", alarms="...")
+
+    HTML 範例：
+        <p>目前時間：{time}</p>
+        <ul>{alarms}</ul>
+    """
+    try:
+        with open(file, "r") as f:
+            html = f.read()
+    except Exception as e:
+        return "<h1>404 File Not Found</h1><p>%s</p>" % e
+
+    # 簡單字串替換
+    for key, value in kwargs.items():
+        html = html.replace("{" + key + "}", str(value))
+        
+    return html
+
+def now_time(tz=8, sync=False):
+    """
+    傳回目前時間字串 (YYYY-MM-DD HH:MM:SS)
+    參數：
+      tz   ：時區偏移，預設台灣 UTC+8
+      sync ：若為 True，會嘗試同步 NTP 時間（需 Wi-Fi）
+    """
+    # 若要求同步且有 Wi-Fi 連線
+    if sync:
+        try:
+            sta = network.WLAN(network.STA_IF)
+            if ntptime and sta.isconnected():
+                ntptime.host = "pool.ntp.org"
+                ntptime.settime()
+                print("⏰ 已從 NTP 更新時間")
+        except Exception as e:
+            print("⚠️ NTP 同步失敗：", e)
+
+    # 取得當前 UTC 時間 + 時區偏移
+    try:
+        t = list(utime.localtime(utime.time()))
+        return "%04d-%02d-%02d %02d:%02d:%02d" % (t[0], t[1], t[2], t[3], t[4], t[5])
+    except Exception as e:
+        print("⚠️ 取得時間失敗：", e)
+        return "0000-00-00 00:00:00"
+    
+
+class WebRequest:
+    """封裝簡易的 HTTP 請求物件"""
+    def __init__(self, method, path, args, body=""):
+        self.method = method
+        self.path = path
+        self.args = args
+        self.body = body
+
+
+class WebApp:
+    def __init__(self, title="MicroPython WebApp"):
+        self.title = title
+        self.routes = {}
+
+    def route(self, path):
+        def wrapper(func):
+            self.routes[path] = func
+            return func
+        return wrapper
+
+    async def start(self, port=80):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('0.0.0.0', port))
+        s.listen(5)
+        s.setblocking(False)
+
+        sta = network.WLAN(network.STA_IF)
+        ap = network.WLAN(network.AP_IF)
+        print("STA:", sta.ifconfig())
+        print("AP:", ap.ifconfig())
+        print("🌐 WebApp running on http://%s:%d/" % (sta.ifconfig()[0], port))
+
+        while True:
+            try:
+                client, addr = s.accept()  # non-blocking 模式下，若無連線會丟 OSError
+                asyncio.create_task(self.handle_client(client))
+            except OSError:
+                # 沒有連線就先讓出控制權
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                sys.print_exception(e)
+                await asyncio.sleep(0.5)
+
+    async def handle_client(self, client):
+        try:
+            client.settimeout(3)
+
+            # 嘗試接收資料（HTTP 請求）
+            try:
+                req = client.recv(1024)
+            except OSError as e:
+                # 若 timeout 或 socket 被中斷
+                if e.args[0] == 116:  # ETIMEDOUT
+                    client.close()
+                    return
+                raise e
+
+            if not req:
+                client.close()
+                return
+
+            # ---- 解析 HTTP ----
+            req = req.decode("utf-8", "ignore")
+            line = req.split("\r\n")[0]
+            parts = line.split(" ")
+            method = parts[0]
+            path = parts[1] if len(parts) > 1 else "/"
+            
+            body = ""
+            if "\r\n\r\n" in req:
+                _, body = req.split("\r\n\r\n", 1)
+
+            # ---- 查詢參數解析 ----
+            args = {}
+            if "?" in path:
+                base, query = path.split("?", 1)
+                path = base
+                for kv in query.split("&"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        args[k] = v
+
+            # ---- 建立請求物件 ----
+            request = WebRequest(method, path, args, body)
+
+            # ---- 路由分派 ----
+            if path in self.routes:
+                result = self.routes[path](request)
+                if isinstance(result, (dict, list)):
+                    content = (
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Connection: close\r\n\r\n"
+                        + str(result)
+                    )
+                else:
+                    content = (
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: text/html\r\n"
+                        "Connection: close\r\n\r\n"
+                        + str(result)
+                    )
+            else:
+                content = (
+                    "HTTP/1.1 404 NOT FOUND\r\n"
+                    "Content-Type: text/html\r\n"
+                    "Connection: close\r\n\r\n"
+                    "<h1>404 Not Found</h1>"
+                )
+
+            # ---- 傳送資料 ----
+            try:
+                client.send(content.encode())
+            except OSError:
+                pass  # 若客戶端中斷，忽略即可
+
+        except Exception as e:
+            print("⚠️ handle_client error:", e)
+
+        finally:
+            client.close()
+            await asyncio.sleep(0)
 
     
 # 控制 RGB LED 燈色，預設關燈
