@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 智慧鬧鐘控制面板</title>
+<style>
+body {
+  font-family: "Noto Sans TC", system-ui, sans-serif;
+  background: #f3f4f6;
+  margin: 0;
+  padding: 0;
+}
+.container {
+  max-width: 720px;
+  margin: 20px auto;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  padding: 20px;
+}
+h1 {
+  text-align: center;
+  margin-bottom: 10px;
+  color: #2563eb;
+}
+label {
+  display: block;
+  margin-top: 10px;
+}
+input, button {
+  font-size: 1rem;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #bbb;
+}
+button {
+  cursor: pointer;
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  transition: background-color 0.2s;
+}
+button:hover {
+  background-color: #1e40af;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.row > div {
+  flex: 1 1 110px;
+}
+.alarm {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid #eee;
+  padding: 8px 0;
+}
+#time {
+  font-weight: bold;
+  color: #dc2626;
+}
+.action-bar {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🕓 ESP32 智慧鬧鐘</h1>
+  <div>目前時間：<span id="time">--:--:--</span></div>
+
+  <h2>新增鬧鐘</h2>
+  <div class="row">
+    <div><label> <input id="year" type="number" min="2024" max="2100" value="2025">年 </label></div>
+    <div><label> <input id="month" type="number" min="1" max="12" value="1"></label>月 </div>
+    <div><label> <input id="day" type="number" min="1" max="31" value="1"></label>日 </div>
+    <div><label> <input id="hour" type="number" min="0" max="23" value="0"></label>時 </div>
+    <div><label> <input id="minute" type="number" min="0" max="59" value="0"></label>分 </div>
+  </div>
+  <label><input id="enabled" type="checkbox" checked> 啟用</label>
+
+  <div class="action-bar">
+    <button id="add">➕ 新增鬧鐘</button>
+    <button id="reset">🧹 重置鬧鐘</button>
+    <button id="test">🔔 測試響鈴</button>
+    <button id="stop">🛑 停止鈴聲</button>
+  </div>
+
+  <h2>已設定鬧鐘</h2>
+  <div id="list">
+    <p style="color:#999;">目前沒有設定任何鬧鐘 ⏰</p>
+  </div>
+</div>
+
+<script>
+// === 工具函式 ===
+function pad(n){ return (n<10 ? '0' : '') + n; }
+
+async function api(path, opt){
+  const r = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opt));
+  return r.json().catch(()=>({ok:r.ok}));
+}
+
+// === 更新時間與鬧鐘清單 ===
+async function refresh(){
+  // 更新目前時間
+  const t = await (await fetch('/api/time')).text();
+  document.getElementById('time').textContent = t || '--:--:--';
+
+  // 更新鬧鐘清單
+  const data = await (await fetch('/api/alarms')).json();
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+
+  if (!data.alarms || data.alarms.length === 0) {
+    list.innerHTML = "<p style='color:#999;'>目前沒有設定任何鬧鐘 ⏰</p>";
+    return;
+  }
+
+  data.alarms.forEach((a, idx)=>{
+    const d = document.createElement('div');
+    d.className = 'alarm';
+    d.innerHTML = `
+      <div>🕒 A${idx+1} ${a.enabled ? '✔️' : '❌'} 
+      ${a.y}-${pad(a.m)}-${pad(a.d)} ${pad(a.h)}:${pad(a.min)}</div>
+      <div>
+        <button class="toggle" data-i="${idx}">
+          ${a.enabled ? '停用' : '啟用'}
+        </button>
+        <button class="del" data-i="${idx}">刪除</button>
+      </div>`;
+    list.appendChild(d);
+  });
+
+  // 綁定刪除按鈕
+  list.querySelectorAll('.del').forEach(b => b.onclick = async ()=>{
+    if(confirm("確定要刪除這組鬧鐘嗎？")){
+      await api('/api/alarms', {
+        method: 'DELETE',
+        body: JSON.stringify({ i: +b.dataset.i })
+      });
+      refresh();
+    }
+  });
+
+  // 綁定啟用/停用按鈕
+  list.querySelectorAll('.toggle').forEach(b => b.onclick = async ()=>{
+    await api('/api/alarms', {
+      method: 'POST',
+      body: JSON.stringify({ toggle: +b.dataset.i })
+    });
+    refresh();
+  });
+}
+
+// === 新增鬧鐘 ===
+document.getElementById('add').onclick = async ()=>{
+  const body = JSON.stringify({
+    year:+year.value,
+    month:+month.value,
+    day:+day.value,
+    hour:+hour.value,
+    minute:+minute.value,
+    enabled:enabled.checked
+  });
+  await api('/api/alarms',{method:'POST', body});
+  refresh();
+};
+
+// === 🧹 重置鬧鐘 ===
+document.getElementById('reset').onclick = async ()=>{
+  if(confirm("確定要刪除所有鬧鐘嗎？")){
+    await fetch('/api/alarms/reset', {method:'DELETE'});
+    refresh();
+  }
+};
+
+// === 🔔 測試響鈴 ===
+document.getElementById('test').onclick = ()=> fetch('/api/ring/test',{method:'POST'});
+
+// === 🛑 停止鈴聲 ===
+document.getElementById('stop').onclick = ()=> fetch('/api/ring/stop',{method:'POST'});
+
+// === ⏱ 自動刷新 ===
+setInterval(refresh, 1000);
+refresh();
+</script>
+</body>
+</html>
+
