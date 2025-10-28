@@ -410,7 +410,7 @@ async def alarm_task():
 # 🚀 主程式入口
 # ----------------------------
 async def main():
-    ip = wifi_auto("CHT1781", "87437143")
+    ip = wifi_auto("CSIE_404", "11223344")
     print("ESP32 智慧鬧鐘啟動中...")
     await asyncio.gather(
         app.start(80),
