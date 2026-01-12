@@ -78,7 +78,9 @@
 ip = wifi_auto("你的SSID", "你的密碼")
 
 # 修改 MQTT Broker (如果需要)
-MQTT_BROKER = "broker.emqx.io"
+MQTT_BROKER = "broker.emqx.io"   # 你的 EMQX IP
+MQTT_PORT   = 1883
+DEVICE_ID   = "esp32_alarm"
 ```
 
 ### 3. 執行主程式
