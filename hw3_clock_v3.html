@@ -76,10 +76,14 @@ button:hover {
   <div>目前時間：<span id="time">--:--:--</span></div>
 
   <h2>新增鬧鐘</h2>
+  
+  <p class="hint">
+     📌 若「年 / 月 / 日」留空，將視為 <b>週期鬧鐘（每天）</b>
+  </p>
   <div class="row">
-      <div><label><input id="year" type="number" min="2024" max="2100" value="2025"> 年</label></div>
-      <div><label><input id="month" type="number" min="1" max="12" value="1"> 月</label></div>
-      <div><label><input id="day" type="number" min="1" max="31" value="1"> 日</label></div>
+      <div><label><input id="year" type="number" min="2024" max="2100" placeholder="(選填)"> 年</label></div>
+      <div><label><input id="month" type="number" min="1" max="12" placeholder="(選填)"> 月</label></div>
+      <div><label><input id="day" type="number" min="1" max="31" placeholder="(選填)"> 日</label></div>
       <div><label><input id="hour" type="number" min="0" max="23" value="0"> 時</label></div>
       <div><label><input id="minute" type="number" min="0" max="59" value="0"> 分</label></div>
   </div>
@@ -137,9 +141,17 @@ async function refresh(){
   data.alarms.forEach((a, idx) => {
     const d = document.createElement('div');
     d.className = 'alarm';
+    let timeText = '';
+    if (a.y === -1 && a.m === -1 && a.d === -1) {
+      timeText = `每天 ${pad(a.h)}:${pad(a.min)}`; 
+    } 
+    else {
+      timeText = `${a.y}-${pad(a.m)}-${pad(a.d)} ${pad(a.h)}:${pad(a.min)}`; 
+    }
+
     d.innerHTML = `
       <div>🕒 A${idx+1} ${a.enabled ? '✔️' : '❌'} 
-      ${a.y}-${pad(a.m)}-${pad(a.d)} ${pad(a.h)}:${pad(a.min)}
+      ${timeText}
       ${a.song ? `🎵 ${songName(a.song)}` : ''}
       </div>
       <div>
@@ -171,13 +183,15 @@ async function refresh(){
 }
 
 document.getElementById('add').onclick = async ()=>{
+  const y = year.value === '' ? -1 : +year.value;
+  const m = month.value === '' ? -1 : +month.value;
+  const d = day.value === '' ? -1 : +day.value;
+
   const body = JSON.stringify({
-    year:+year.value,
-    month:+month.value,
-    day:+day.value,
-    hour:+hour.value,
-    minute:+minute.value,
-    enabled:true,
+    y, m, d,
+    h: +hour.value,
+    min: +minute.value,
+    enabled: true,
     song: song.value
   });
   await api('/api/alarms',{method:'POST', body});
@@ -200,5 +214,3 @@ refresh();
 
 </body>
 </html>
-
-

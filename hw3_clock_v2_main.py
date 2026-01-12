@@ -5,7 +5,36 @@ from ssd1306 import SSD1306_I2C
 import time, utime, json, os
 import network
 from bitmap_font_tool import set_font_path, draw_text
+from umqtt.simple import MQTTClient
+import ujson
 
+
+# ----------------------------
+# 🕓 MQTT 初始化
+# ----------------------------
+MQTT_BROKER = "broker.emqx.io"   # 你的 EMQX IP
+MQTT_PORT   = 1883
+DEVICE_ID   = "esp32_alarm"
+
+TOPIC_BASE = b"iot/" + DEVICE_ID.encode()
+
+def topic(sub):
+    return TOPIC_BASE + b"/" + sub.encode()
+
+mqtt_client = None
+
+def mqtt_init():
+    global mqtt_client
+    mqtt_client = MQTTClient(
+        client_id=DEVICE_ID,
+        server=MQTT_BROKER,
+        port=MQTT_PORT,
+        keepalive=60
+    )
+    mqtt_client.connect()
+    print("📡 MQTT connected")
+    
+    
 # ----------------------------
 # 🕓 OLED 初始化
 # ----------------------------
@@ -89,7 +118,7 @@ def speaker_deinit(spk):
     spk.duty(0)
     spk.deinit()
     return None
-
+"""
 def play_song(spk, notes):
     
     global is_ringing
@@ -110,12 +139,12 @@ def play_song(spk, notes):
     print("🎵 播放結束（或被中斷）")
 
 async def ring_task():
-    #global is_ringing
+    global is_ringing
     is_ringing = True
     print("🔔 鬧鐘觸發，開始播放！")
     play_song(speaker, song)
     #is_ringing = False
-    
+"""
 
 # ----------------------------
 # ⏰ 鬧鐘管理
@@ -147,6 +176,13 @@ def save_alarms(data):
     try:
         with open(ALARM_FILE, "w") as f:
             json.dump(data, f)
+            mqtt_client.publish(
+                topic("user_set"),
+                ujson.dumps({
+                    "count": len(data),
+                    "alarms": data
+                })
+            )
             print("儲存鬧鐘成功:")
     except Exception as e:
         print("儲存鬧鐘失敗:", e)
@@ -313,9 +349,10 @@ def stop(req):
 # 🕒 OLED 顯示與鬧鐘監聽
 # ----------------------------
 
+max_repeat = 3
 
 async def play_song_async(spk, notes):
-    global is_ringing
+    global is_ringing,last_triggered
     for note, duration in notes:
         if not is_ringing:
             print("🛑 停止播放")
@@ -326,25 +363,57 @@ async def play_song_async(spk, notes):
         else:
             spk.freq(freq)
             spk.duty(512)
+        
         await asyncio.sleep_ms(duration)
     spk.duty(0)
     print("🎵 播放結束")
 
 async def ring_task(song):
     global is_ringing
+    #print("DEBUG is_ringing =", is_ringing)
     is_ringing = True
+    play_count = 0
     print("🔔 鬧鐘觸發，開始連續播放！")
     
+    mqtt_client.publish(
+        topic("alarm_state"),
+        ujson.dumps({
+            "is_ringing": True,
+            "time": "start_ring"
+        })
+    )
+    
     try:
-        while is_ringing:
+        while is_ringing and play_count < max_repeat:
+            play_count+=1
+            print(f"現在播放第 {play_count} 次")
             await play_song_async(speaker, song)
     except Exception as e:
         print("⚠️ 播放錯誤:", e)
-
+    is_ringing = False
     speaker.duty(0)
     print("🛑 鬧鐘已停止")
     
+    mqtt_client.publish(
+        topic("alarm_state"),
+        ujson.dumps({
+            "is_ringing": False,
+            "alarm": "finish_ring"
+        })
+    )
     
+    
+def is_alarm_match(alarm, now):
+    y, m, d, h, minute = alarm["y"], alarm["m"], alarm["d"], alarm["h"], alarm["min"]
+    ny, nm, nd, nh, nmin = now
+    print(h,nh,minute,nmin)
+    if h != nh or minute != nmin:
+        return False
+
+    if y == -1 and m == -1 and d == -1:
+        return True
+
+    return (y, m, d) == (ny, nm, nd)
 
 async def oled_task():
     """持續更新 OLED 畫面：顯示時間 + 鬧鐘 + 鈴聲狀態"""
@@ -395,7 +464,11 @@ async def alarm_task():
             
             alarm_time = (a["y"], a["m"], a["d"], a["h"], a["min"])
             print("🕵️ 檢查鬧鐘", i, "時間:", alarm_time, "現在:", now, "last_triggered",last_triggered)
-            if alarm_time == now and i not in last_triggered:
+            trigger_key = (t[0], t[1], t[2], i)
+            #print (f"is_alarm_match:{is_alarm_match(a, now)}")
+            #print(f"trigger_key:{trigger_key}")
+            #print(f"is_ringing{is_ringing}")
+            if is_alarm_match(a, now) and (trigger_key not in last_triggered) and (not is_ringing):
                 print(f"🔔 鬧鐘 {i+1} 觸發！ {alarm_time}")
                 song_name = a.get("song", "NOTES_STAR")  # 取出指定音樂名稱（字串)
                 print(f"🎵 播放指定曲目：{song_name}")
@@ -403,19 +476,44 @@ async def alarm_task():
 
                 # ✅ 使用非阻塞任務播放音樂
                 asyncio.create_task(ring_task(song_data))
-                last_triggered.add(i)
+                last_triggered.add(trigger_key)
         await asyncio.sleep(1)
+
+# ----------------------------
+# MQTT 資料發送
+# ----------------------------
+
+async def mqtt_time_task():
+    while True:
+        t = utime.localtime()
+        data = {
+            "year": t[0],
+            "month": t[1],
+            "day": t[2],
+            "hour": t[3],
+            "minute": t[4],
+            "second": t[5]
+        }
+        mqtt_client.publish(
+            topic("time_now"),
+            ujson.dumps(data)
+        )
+        await asyncio.sleep(10)
+
+        
 
 # ----------------------------
 # 🚀 主程式入口
 # ----------------------------
 async def main():
-    ip = wifi_auto("CSIE_404", "11223344")
+    ip = wifi_auto("CHT1781", "87437143")
+    mqtt_init()
     print("ESP32 智慧鬧鐘啟動中...")
     await asyncio.gather(
         app.start(80),
         oled_task(),
-        alarm_task()
+        alarm_task(),
+        mqtt_time_task()
     )
 
 try:
